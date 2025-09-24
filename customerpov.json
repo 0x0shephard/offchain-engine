@@ -1,0 +1,103 @@
+{
+  "name": "Appointment Booking - Customer POV (Production)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "book-appointment-customer",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "name": "Webhook - Receive Request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [200, 250]
+    },
+    {
+      "parameters": {
+        "functionCode": "const payload = items[0].json;\nif(!payload?.preferred_dates || !Array.isArray(payload.preferred_dates) || payload.preferred_dates.length < 2){\n  throw new Error('Invalid preferred_dates. Expected array [start,end]');\n}\nif(!payload?.customer?.email || !payload?.customer?.phone){\n  throw new Error('Customer email and phone are required');\n}\nreturn [{json:{payload}}];"
+      },
+      "name": "Validate Request",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [400, 250]
+    },
+    {
+      "parameters": {
+        "operation": "freeBusy",
+        "calendarId": "primary",
+        "timeMin": "={{$json.payload.preferred_dates[0]}}",
+        "timeMax": "={{$json.payload.preferred_dates[1]}}"
+      },
+      "name": "Google Calendar FreeBusy",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1,
+      "position": [600, 250],
+      "credentials": {
+        "googleCalendarOAuth2Api": "Google Calendar Prod"
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const busy = $json.calendars[Object.keys($json.calendars)[0]].busy;\nconst start = new Date($json.timeMin);\nconst end = new Date($json.timeMax);\nconst slotDuration = 30 * 60000; // 30 min\n\nlet availableSlots = [];\nlet current = new Date(start);\n\nwhile(current.getTime() + slotDuration <= end.getTime()){\n  let slotStart = new Date(current);\n  let slotEnd = new Date(current.getTime() + slotDuration);\n  const overlaps = busy.some(b=> new Date(b.start) < slotEnd && new Date(b.end) > slotStart);\n  if(!overlaps){\n    availableSlots.push({start: slotStart.toISOString(), end: slotEnd.toISOString()});\n  }\n  current = new Date(current.getTime() + slotDuration);\n}\n\nif(availableSlots.length === 0){\n  return [{json:{error:true,message:'No available slots in given range'}}];\n}\n\nreturn [{json:{payload:$json.payload, availableSlots}}];"
+      },
+      "name": "Compute Available Slots",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [850, 250]
+    },
+    {
+      "parameters": {
+        "fromEmail": "no-reply@yourdomain.com",
+        "toEmail": "={{$json.payload.customer.email}}",
+        "subject": "Available Appointment Times",
+        "text": "Hello {{$json.payload.customer.name}},\\n\\nHere are available slots:\\n{{$json.availableSlots.map(s=>s.start).join('\\n')}}\\n\\nReply to confirm your preferred slot.",
+        "html": "<p>Hello {{$json.payload.customer.name}},</p><p>Here are available slots:</p><ul>{{ $json.availableSlots.map(s=>`<li>${s.start}</li>`).join('') }}</ul><p>Please reply with your preferred slot.</p>"
+      },
+      "name": "Send Email (SMTP)",
+      "type": "n8n-nodes-base.smtp",
+      "typeVersion": 1,
+      "position": [1100, 200],
+      "credentials": {
+        "smtp": "SMTP Prod"
+      }
+    },
+    {
+      "parameters": {
+        "to": "={{$json.payload.customer.phone}}",
+        "message": "Hi {{$json.payload.customer.name}}, here are available slots: {{$json.availableSlots.map(s=>s.start).join(', ')}}. Reply with your preferred start time to confirm.",
+        "from": "+1234567890"
+      },
+      "name": "Send SMS (Twilio)",
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "position": [1100, 300],
+      "credentials": {
+        "twilioApi": "Twilio Prod"
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "if($json.error){\n  return [{json:{status:'failed', message:$json.message}}];\n}\nreturn [{json:{status:'success', message:'Slots sent to customer', slots:$json.availableSlots}}];"
+      },
+      "name": "Prepare Response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1350, 250]
+    }
+  ],
+  "connections": {
+    "Webhook - Receive Request": {
+      "main": [[{"node":"Validate Request","type":"main","index":0}]]
+    },
+    "Validate Request": {
+      "main": [[{"node":"Google Calendar FreeBusy","type":"main","index":0}]]
+    },
+    "Google Calendar FreeBusy": {
+      "main": [[{"node":"Compute Available Slots","type":"main","index":0}]]
+    },
+    "Compute Available Slots": {
+      "main": [[{"node":"Send Email (SMTP)","type":"main","index":0},{"node":"Send SMS (Twilio)","type":"main","index":0},{"node":"Prepare Response","type":"main","index":0}]]
+    }
+  }
+}
